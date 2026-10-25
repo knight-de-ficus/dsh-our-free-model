@@ -28,6 +28,7 @@ import process from 'node:process'
 import { chatFrames } from './lib/fake-kernel.mjs'
 
 let activeCase
+const nativeTimeout = globalThis.setTimeout
 const TASK = 'COMBO_TASK_SENTINEL: answer the original question'
 const ANSWER = 'VISIBLE_ANSWER_SENTINEL'
 const sse = payload => `data: ${JSON.stringify(payload)}\n\n`
@@ -55,8 +56,12 @@ const server = http.createServer((req, res) => {
       res.end(answer.body ?? '')
       return
     }
+    answer.before?.()
     res.writeHead(200, { 'content-type': 'text/event-stream' })
-    res.end(answer.body ?? '')
+    if (answer.hold) {
+      res.write(answer.body ?? ': waiting\n\n')
+      answer.ready?.()
+    } else res.end(answer.body ?? '')
   })
 })
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -83,21 +88,27 @@ const check = async (name, fn) => {
   catch (error) { failures += 1; console.error(`FAIL  ${name} — ${error.message}`) }
 }
 
-function setup(answers, model = COMBO_ID) {
+function setup(answers, model = COMBO_ID, settings = {}) {
+  if (model && typeof model === 'object') {
+    settings = model
+    model = COMBO_ID
+  }
   const scenario = { answers, requests: [] }
   activeCase = scenario
   const turns = []
+  const usage = []
+  const warnings = []
   const controller = new AbortController()
   const adapter = new FreeModelAdapter({
     state: () => ({
       catalog: CATALOG,
       membership: { [ROUTE_MAIN]: MODELS },
-      settings: { enabled: true, defaultMaxTokens: 32768, streamRecovery: false },
+      settings: { enabled: true, defaultMaxTokens: 32768, streamRecovery: false, ...settings },
       attributionUserAgent: 'offline-combo-advance-test',
     }),
-    recordUsage: () => {},
+    recordUsage: row => usage.push(row),
     recordTurn: row => turns.push(row),
-    warn: () => {},
+    warn: message => warnings.push(message),
   })
   const stream = adapter.stream({
     provider: ROUTE_MAIN,
@@ -107,11 +118,11 @@ function setup(answers, model = COMBO_ID) {
     messages: [{ role: 'user', content: [{ type: 'text', text: TASK }] }],
     signal: controller.signal,
   })
-  return { scenario, turns, controller, stream }
+  return { scenario, turns, usage, warnings, controller, stream }
 }
 
-async function drive(answers, model) {
-  const run = setup(answers, model)
+async function drive(answers, model = COMBO_ID, settings = {}) {
+  const run = setup(answers, model, settings)
   const chunks = []
   try {
     for await (const chunk of run.stream) chunks.push(chunk)
@@ -213,6 +224,49 @@ await check('a reasoning block-end does not commit the chain', async () => {
   assert.equal(run.turns[0].attempts, 2)
 })
 
+for (const [name, settings, usage] of [
+  ['recovery disabled', { streamRecovery: false }, ''],
+  ['checkpoint exceeds recovery limit', { streamRecovery: { checkpointLimit: 1 } }, ''],
+  ['reasoning consumes output budget', { streamRecovery: true }, sse({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 32768, total_tokens: 32778 } })],
+]) await check(`normal reasoning-only stop advances when ${name}`, async () => {
+  const run = await drive([
+    { body: reasoningFrames('analysis without a deliverable') + usage
+      + sse({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }) + 'data: [DONE]\n\n' },
+    { body: chatFrames(ANSWER) },
+  ], settings)
+  assert.equal(run.scenario.requests.length, 2, 'a normal stop without an answer must not end the combo')
+  assert.notEqual(run.scenario.requests[1].body.model, run.scenario.requests[0].body.model, 'advance to the next candidate, not unsafe continuation')
+  assert.equal(run.text, ANSWER)
+  assert.equal(run.finish?.kind, 'stop')
+  assert.ok(noThinking(run.chunks), 'uncommitted reasoning remains invisible')
+  assert.equal(run.usage[0].ok, false, 'no-answer attempt is not recorded as success')
+  assert.equal(run.turns[0].ok, true)
+  assert.equal(run.turns[0].attempts, 2)
+})
+
+await check('first answer latency excludes earlier reasoning and store preserves only safe diagnostics', async () => {
+  const nativeNow = Date.now
+  let now = nativeNow()
+  Date.now = () => ++now
+  let run
+  try { run = await drive([{ body: reasoningFrames('private reasoning') + chatFrames(ANSWER) }]) }
+  finally { Date.now = nativeNow }
+  assert.ok(run.usage[0].firstAnswerMs > run.usage[0].ttftMs)
+  const { recordUsage, migrateStats, STATS_INITIAL } = await import('../src/store.js')
+  let state = structuredClone(STATS_INITIAL)
+  const stats = { edit(fn) { state = fn(state) } }
+  recordUsage(stats, { ...run.usage[0], ok: false, failureKind: 'auth', httpStatus: 403 })
+  const sample = state.samples.at(-1)
+  assert.equal(sample.firstAnswerMs, run.usage[0].firstAnswerMs)
+  assert.equal(sample.failureKind, 'auth')
+  assert.equal(sample.httpStatus, 403)
+  recordUsage(stats, { ...run.usage[0], firstAnswerMs: NaN, failureKind: 'raw-secret', httpStatus: 600, ok: false })
+  assert.equal(state.samples.at(-1).firstAnswerMs, undefined)
+  assert.equal(state.samples.at(-1).failureKind, undefined)
+  assert.equal(state.samples.at(-1).httpStatus, undefined)
+  assert.equal(migrateStats({ samples: [{ ok: false }] }).samples[0].firstAnswerMs, undefined)
+})
+
 await check('visible text commits the chain: a later refusal ends the turn', async () => {
   const run = await drive([
     { body: sse({ choices: [{ index: 0, delta: { content: ANSWER } }] }) + sse({ error: { message: 'rate limit exceeded' } }) },
@@ -250,6 +304,120 @@ for (const [status, type, message, attempts] of [
   assert.equal(run.scenario.requests.length, attempts)
   assert.equal(run.finish?.kind, attempts === 2 ? 'stop' : 'error')
   if (attempts === 2) assert.equal(run.text, ANSWER)
+})
+
+for (const streamRecovery of [false, true]) await check(`a reasoning-only candidate has a first-answer deadline (recovery ${streamRecovery})`, async () => {
+  let ready
+  const responseReady = new Promise(resolve => { ready = resolve })
+  const deadlines = []
+  const nativeNow = Date.now
+  let now = nativeNow()
+  Date.now = () => now
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    if (delay === 120_000 || delay === 60_000) {
+      const timer = { active: true, unref() {} }
+      deadlines.push({ delay, fire: () => { if (timer.active) callback(...args) } })
+      return timer
+    }
+    return nativeTimeout(callback, delay, ...args)
+  }
+  const nativeClearTimeout = globalThis.clearTimeout
+  globalThis.clearTimeout = timer => {
+    if (timer && typeof timer === 'object' && 'active' in timer) timer.active = false
+    else nativeClearTimeout(timer)
+  }
+  const run = setup([
+    ...streamRecovery ? [{ body: reasoningFrames('checkpoint before continuation'), before: () => { now += 60_000 } }] : [],
+    { body: reasoningFrames('thinking without an answer'), hold: true, ready },
+    { body: chatFrames(ANSWER) },
+  ], { streamRecovery })
+  const chunks = []
+  const pending = (async () => { for await (const chunk of run.stream) chunks.push(chunk) })()
+  try {
+    await responseReady
+    assert.equal(deadlines.length, streamRecovery ? 2 : 1, 'each attempt retains the candidate’s first-answer deadline')
+    assert.equal(deadlines.at(-1).delay, streamRecovery ? 60_000 : 120_000, 'continuation does not reset the silent wait budget')
+    deadlines.at(-1).fire()
+    await pending
+    assert.equal(run.scenario.requests.length, streamRecovery ? 3 : 2, 'deadline cancels only the stalled candidate')
+    assert.equal(chunks.find(chunk => chunk.type === 'finish')?.reason.kind, 'stop')
+    assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), ANSWER)
+    assert.ok(noThinking(chunks), 'discard the stalled candidate’s held reasoning')
+    assert.equal(run.turns[0].attempts, 2)
+    const expiredUsage = run.usage[streamRecovery ? 1 : 0]
+    assert.equal(expiredUsage.ok, false)
+    assert.equal(expiredUsage.failureKind, 'timeout')
+    assert.equal(expiredUsage.firstAnswerMs, undefined)
+    assert.equal(expiredUsage.truncated, true, 'first-answer expiration records a truncated attempt')
+    assert.notEqual(expiredUsage.aborted, true, 'candidate expiration is not caller cancellation')
+  } finally {
+    run.controller.abort()
+    await pending.catch(() => {})
+    globalThis.setTimeout = nativeTimeout
+    globalThis.clearTimeout = nativeClearTimeout
+    Date.now = nativeNow
+  }
+})
+
+await check('caller cancellation of a waiting candidate never advances the chain', async () => {
+  let ready
+  const responseReady = new Promise(resolve => { ready = resolve })
+  const run = setup([{ body: reasoningFrames('waiting for the caller'), hold: true, ready }])
+  const chunks = []
+  const pending = (async () => { for await (const chunk of run.stream) chunks.push(chunk) })()
+  try {
+    await responseReady
+    run.controller.abort()
+    await pending
+    assert.equal(run.scenario.requests.length, 1)
+    assert.equal(chunks.find(chunk => chunk.type === 'finish')?.reason.kind, 'aborted')
+    assert.equal(run.turns[0].attempts, 1)
+  } finally {
+    run.controller.abort()
+    await pending
+  }
+})
+
+await check('a streamed tool call commits the candidate before a later refusal', async () => {
+  const run = await drive([{
+    body: sse({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_local', type: 'function', function: { name: 'local_tool', arguments: '{}' } }] } }] })
+      + sse({ error: { message: 'rate limit exceeded' } }),
+  }])
+  assert.equal(run.scenario.requests.length, 1, 'a delivered tool call cannot be replayed on another candidate')
+  assert.ok(run.chunks.some(chunk => chunk.type === 'tool-call-delta'))
+  assert.equal(run.finish?.kind, 'error')
+})
+
+await check('exhausted upstream candidates report a server failure without blaming local credentials', async () => {
+  const run = await drive([
+    { status: 403, body: '{"error":{"message":"invalid_credential","code":"invalid_credential"}}' },
+    { status: 502, body: '{"error":{"message":"upstream unavailable"}}' },
+  ])
+  assert.equal(run.scenario.requests.length, 2)
+  assert.equal(run.finish?.kind, 'error')
+  assert.equal(run.finish.failure.code, 'SERVER')
+  assert.match(run.finish.failure.message, /^Upstream error:/)
+  assert.match(run.finish.failure.message, /2 upstream candidates/)
+  assert.match(run.finish.failure.message, /retry later.*local gateway logs/i)
+  assert.doesNotMatch(run.finish.failure.message, /403|invalid_credential|auth|log.?in|sign.?in/i)
+  assert.equal(run.usage[0].failureKind, 'auth')
+  assert.equal(run.usage[0].httpStatus, 403)
+  assert.ok(run.warnings.some(message => message.includes('HTTP 403')), 'retain upstream status in local diagnostics')
+  assert.ok(run.warnings.some(message => message.includes('auth/account')), 'retain upstream credential classification locally')
+  assert.ok(run.warnings.some(message => message.includes('HTTP 502')), 'retain the other candidate failure locally')
+  assert.equal(run.turns[0].ok, false)
+  assert.equal(run.turns[0].attempts, 2)
+})
+
+await check('a request parameter error advances to the next combo candidate', async () => {
+  const run = await drive([
+    { status: 400, body: '{"error":{"message":"invalid request parameter"}}' },
+    { body: chatFrames(ANSWER) },
+  ])
+  assert.equal(run.scenario.requests.length, 2)
+  assert.equal(run.finish?.kind, 'stop')
+  assert.equal(run.text, ANSWER)
+  assert.equal(run.turns[0].attempts, 2)
 })
 
 server.close()

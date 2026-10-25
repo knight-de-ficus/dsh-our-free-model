@@ -37,11 +37,11 @@ window.__ModuleLoader__.load({
     // ── copy ──────────────────────────────────────────────────────────────────
     const DICT = {
       zh: {
-        'meta.title': 'Our Free Model',
+        'meta.title': 'AG',
         'meta.description': '在 DeepSeek Harness 内直连免密免费模型：清单随上游更新、地区可用性按需探测、思考强度真实生效，并附 Token 看板与 OpenAI 兼容转发端口。',
         'ann.pitch': '你只需在 dsh 里装上这个插件，无需登录、注册、填 API Key 或任何其它操作，就能用上包括 Muse Spark 1.3、MiMo V2.6 在内的前沿模型——完全免费，不限量。',
-        nav: 'Our Free Model',
-        title: 'Our Free Model',
+        nav: 'AG',
+        title: 'AG',
         refresh: '刷新清单',
         reprobe: '重新探测可用性',
         probing: '探测中…',
@@ -268,7 +268,7 @@ window.__ModuleLoader__.load({
         'ann.n1': '两个新模型已通过 EAC 渠道上线，由 OpenCode 免费车道转发：DeepSeek V4.1 Flash Free 与 GLM 5.3 Flash Free。',
         'ann.n2': '它们排在 EAC 模型页最前面，带红色 NEW / 爆 徽标和「高速」标签，一眼就能找到。',
         'ann.n3': '两个模型都真实支持思考档位（低 / 高 / 最大），DeepSeek 还能关闭思考；档位直接下发到上游，不是提示词。',
-        'ann.s1': '在输入框的模型选择器里选 “Our Free Model” 分组下的任意模型。',
+        'ann.s1': '在输入框的模型选择器里选 “AG” 分组下的任意模型。',
         'ann.s2': '需要更强推理时点开 Effort 档位；它是真实下发的输出预算，不是提示词。',
         'ann.s3': '想被其它本地工具调用：设置页 → 本地转发 → 启用，把 Base URL 和 Key 填进去。',
         'ann.s4': '地区受限模型会在你切换网络出口后自动重新归类，无需手动操作。',
@@ -537,7 +537,7 @@ window.__ModuleLoader__.load({
         'gw.relayKey': '中继密钥',
         'gw.rotate': '轮换',
         'gw.relayNote': '中继只放行模型接口（/v1/*），并要求携带中继密钥；局域网绑定意味着同网段的设备都能访问到这个端口。',
-        'gw.freeLaneNote': '免费车道（Our Free Model）自己的转发端口在「免费模型」页的「本地转发」分区。',
+        'gw.freeLaneNote': '免费车道（AG）自己的转发端口在「免费模型」页的「本地转发」分区。',
         'chan.credits.left': '剩余积分',
         'chan.credits.tokens': '剩余 Token',
         'chan.credits.dollars': '剩余余额（USD）',
@@ -734,11 +734,11 @@ window.__ModuleLoader__.load({
         'gw.clientsModels': '可转发模型 {n} 个',
       },
       en: {
-        'meta.title': 'Our Free Model',
+        'meta.title': 'AG',
         'meta.description': 'Free no-key models inside DeepSeek Harness: a roster that follows upstream, on-demand regional availability, genuinely enforced thinking levels, a token dashboard and an OpenAI-compatible local forward port.',
         'ann.pitch': 'All you do is install this plugin in dsh — no login, no sign-up, no API key, no other step of any kind. The frontier models are simply there, Muse Spark 1.3 and MiMo V2.6 among them. Completely free, with no usage cap.',
-        nav: 'Our Free Model',
-        title: 'Our Free Model',
+        nav: 'AG',
+        title: 'AG',
         refresh: 'Refresh roster',
         reprobe: 'Re-probe availability',
         probing: 'Probing…',
@@ -965,7 +965,7 @@ window.__ModuleLoader__.load({
         'ann.n1': 'Two new models are live on the EAC lane, relayed from OpenCode’s free tier: DeepSeek V4.1 Flash Free and GLM 5.3 Flash Free.',
         'ann.n2': 'They lead the EAC models page, marked with a red NEW / 爆 badge and a “Fast” tag.',
         'ann.n3': 'Both expose real thinking levels (Low / High / Max), and DeepSeek can also switch thinking off; the level goes to the upstream as-is, not as a prompt hint.',
-        'ann.s1': 'Pick any model under the “Our Free Model” group in the composer’s model selector.',
+        'ann.s1': 'Pick any model under the “AG” group in the composer’s model selector.',
         'ann.s2': 'For harder reasoning, open the Effort menu — it sends a real budget, not a prompt hint.',
         'ann.s3': 'To serve other local tools: Settings → Local forward → enable, then copy the base URL and key.',
         'ann.s4': 'Region-limited models reclassify themselves once your network egress changes.',
@@ -1234,7 +1234,7 @@ window.__ModuleLoader__.load({
         'gw.relayKey': 'Relay key',
         'gw.rotate': 'Rotate',
         'gw.relayNote': 'The relay forwards only the model routes (/v1/*) and demands the relay key; binding to the LAN means every device on the network can reach that port.',
-        'gw.freeLaneNote': 'The free lane (Our Free Model) has its own forward port under "Local forward" on the Free models page.',
+        'gw.freeLaneNote': 'The free lane (AG) has its own forward port under "Local forward" on the Free models page.',
         'chan.credits.left': 'Credits left',
         'chan.credits.tokens': 'Tokens left',
         'chan.credits.dollars': 'Balance left (USD)',
@@ -6396,7 +6396,6 @@ window.__ModuleLoader__.load({
       // and would paint a perfectly usable lane amber.
       const level = ratio >= 0.6 ? 'ok' : ratio >= 0.3 ? 'busy' : 'over'
       return h('div', { className: 'ofm_page' },
-        h(SponsorBanner, { t }),
         h('header', { className: 'ofm_hero ofm_glass' },
           h('div', { className: 'ofm_pagehead' },
             h('div', { className: 'ofm_pagetitle' },
@@ -6448,7 +6447,6 @@ window.__ModuleLoader__.load({
           ?? (poolError !== '' ? poolError : t('pool.reasonUnknown')))
         : ''
       return h('div', { className: 'ofm_page' },
-        h(SponsorBanner, { t }),
         h('header', { className: 'ofm_hero ofm_glass' },
           h('div', { className: 'ofm_pagehead' },
             h('div', { className: 'ofm_pagetitle' },
@@ -6702,7 +6700,7 @@ window.__ModuleLoader__.load({
             if (String(at) === seen) return
             try { window.localStorage?.setItem('ofm.reloadedAt', String(at)) } catch { /* ignore */ }
             showToast({
-              title: meta.version !== '' ? `Our Free Model ${meta.version}` : 'Our Free Model',
+              title: meta.version !== '' ? `AG ${meta.version}` : 'AG',
               body: t('reload.done').replace('{n}', String(meta.reloadCount ?? 0)),
               actions: [{ label: t('reload.refresh'), onClick: () => { try { window.location.reload() } catch { /* top-level navigation refused */ } } }],
               holdMs: 12000,

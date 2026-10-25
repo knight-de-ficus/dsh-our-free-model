@@ -391,6 +391,44 @@
   }
 }
 
+/* Group visibility switches share one optical baseline with their labels. */
+.model-browser .model-visibility-controls {
+  align-items: center;
+  gap: 10px 22px;
+}
+
+.model-browser .model-visibility-controls > label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  margin: 0;
+  color: var(--md-ink-secondary);
+  font-size: 12px;
+  line-height: 1.25;
+  cursor: pointer;
+}
+
+.model-browser .model-visibility-controls > label > input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 0;
+  accent-color: var(--ag-ink, #111315);
+  vertical-align: middle;
+}
+
+.model-browser .model-visibility-controls > label > span {
+  display: block;
+  line-height: 16px;
+}
+
+.model-browser .model-visibility-controls > label:has(input:disabled) {
+  cursor: wait;
+  opacity: 0.55;
+}
+
 /* ==========================================================================
    夜主题精修 · 深海数据仪表（redesign-night）
    范围：仅新增 [data-theme="dark"] 覆盖；不改动浅色与既有选择器。

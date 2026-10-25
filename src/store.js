@@ -19,6 +19,9 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { FAILURE_KIND } from './route/classify.js'
+
+const failureKinds = new Set(Object.values(FAILURE_KIND))
 
 /** Same resolution the harness home-paths helper uses: `$DSH_HOME` else `~/.dsh`. */
 export function resolveDshHome() {
@@ -393,6 +396,9 @@ export function recordUsage(stats, record) {
       // the row they are indistinguishable from a genuinely empty completion, and
       // there is then nothing to audit a "that turn vanished" report against
       // (issue #10).
+      ...record.ok !== true && failureKinds.has(record.failureKind) ? { failureKind: record.failureKind } : {},
+      ...record.ok !== true && Number.isInteger(record.httpStatus) && record.httpStatus >= 100 && record.httpStatus <= 599 ? { httpStatus: record.httpStatus } : {},
+      ...Number.isFinite(record.firstAnswerMs) && record.firstAnswerMs >= 0 ? { firstAnswerMs: record.firstAnswerMs } : {},
       ...record.truncated === true ? { truncated: true } : {},
       ...record.noUsage === true ? { noUsage: true } : {},
       ...typeof record.recoveryId === 'string' ? { recoveryId: record.recoveryId } : {},

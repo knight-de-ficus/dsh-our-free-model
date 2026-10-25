@@ -38,11 +38,12 @@ export const ROUTE_REGION = 'our-free-model-region'
 
 /** Group headings — the only strings the picker shows as a section title. */
 export const ROUTE_LABELS = {
-  [ROUTE_MAIN]: 'Our Free Model',
-  [ROUTE_REGION]: 'Our Free Model · region-limited',
+  [ROUTE_MAIN]: 'AG',
+  [ROUTE_REGION]: 'AG · region-limited',
 }
 
 const STYLE_FOR_WIRE = { chat: 'chat', responses: 'flat', messages: 'claude' }
+const COMBO_FIRST_ANSWER_TIMEOUT_MS = 120_000
 
 export class FreeModelAdapter {
   /**
@@ -237,7 +238,6 @@ export class FreeModelAdapter {
       yield { type: 'finish', reason: { kind: 'error', failure: { message: `the chain "${entry.name}" has no model available on this egress`, code: CODE.server } } }
       return
     }
-    const tried = []
     for (let index = 0; index < candidates.length; index += 1) {
       const candidate = candidates[index]
       const iterator = this.runSingle(options, candidate, snapshot, {
@@ -273,12 +273,13 @@ export class FreeModelAdapter {
         return
       }
       const reason = result.verdict === null || result.verdict === undefined ? 'failed' : describeVerdict(result.verdict)
-      tried.push(`${candidate.id} (${reason})`)
       this.deps.warn?.(`our-free-model: chain "${entry.name}" advanced past ${candidate.id} — ${reason}`)
     }
     rejectedTurn(candidates.length)
     yield { type: 'finish', reason: { kind: 'error', failure: {
-      message: `the chain "${entry.name}" exhausted every candidate: ${tried.join('; ')}`,
+      // Candidate credentials belong to the upstream gateway. Keep their
+      // diagnostics in the warnings above so clients do not blame local auth.
+      message: `Upstream error: All ${candidates.length} upstream candidates are unavailable; retry later and inspect the local gateway logs for details.`,
       code: CODE.server,
     } } }
   }
@@ -335,6 +336,10 @@ export class FreeModelAdapter {
     const budget = budgetFor(options.reasoningEffort, entry, options.maxTokens, settings.defaultMaxTokens)
     const declared = toToolDefs(options.tools, style)
     const policy = recoveryPolicy(settings.streamRecovery)
+    // Reasoning and keepalive bytes do not commit a combo candidate. Bound
+    // that silent wait independently of stream recovery and its long turn budget.
+    const answerDeadline = started + Math.min(COMBO_FIRST_ANSWER_TIMEOUT_MS, policy.totalTimeoutMs)
+    let answerCommitted = false
     const session = sessionForConversation(options.sessionId)
     const recoveryId = mintRequestId()
     let attemptMessages = messages
@@ -449,6 +454,12 @@ export class FreeModelAdapter {
         controller.abort()
       }, timeoutMs) : undefined
       timer?.unref?.()
+      let answerExpired = false
+      const answerTimer = plan.allowAdvance === true && !answerCommitted ? setTimeout(() => {
+        answerExpired = true
+        controller.abort()
+      }, Math.max(1, answerDeadline - Date.now())) : undefined
+      answerTimer?.unref?.()
       const channel = createChannel()
       const request = (sealed
         ? postSealedTurn(this.deps, payload, controller.signal, value => channel.push(value))
@@ -471,6 +482,7 @@ export class FreeModelAdapter {
         }))
         .then(() => channel.push(undefined))
         .catch(error => channel.push(error instanceof Error ? error : new Error(String(error))))
+      let firstAnswerAt
       let firstDeltaAt
       let delivered = false
       let sawAnswer = false
@@ -493,6 +505,7 @@ export class FreeModelAdapter {
           cacheRead: usage?.cacheReadTokens ?? 0,
           decodeTokens: ok ? windowTokens(usage, outcome?.sawReasoning === true) : 0,
           ttftMs: firstDeltaAt === undefined ? undefined : firstDeltaAt - attemptStarted,
+          ...(firstAnswerAt === undefined ? {} : { firstAnswerMs: firstAnswerAt - attemptStarted }),
           decodeMs: firstDeltaAt === undefined ? 0 : Date.now() - firstDeltaAt,
           origin: 'harness',
           recoveryId,
@@ -540,7 +553,12 @@ export class FreeModelAdapter {
             if (row.done) { outcome = row.value; break }
             if (options.signal?.aborted === true) throw new UpstreamError('request aborted', CODE.aborted)
             const chunk = row.value
-            if (chunk.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.trim() !== '') sawAnswer = true
+            if (commitsAnswer(chunk)) {
+              if (firstAnswerAt === undefined) firstAnswerAt = Date.now()
+              sawAnswer = true
+              answerCommitted = true
+              clearTimeout(answerTimer)
+            }
             // 续写禁用工具；网关不遵守时也不把工具块交给宿主执行。
             if (recovering && (chunk.blockType === 'tool-call' || chunk.type === 'tool-call-delta' || chunk.block?.type === 'tool-call')) {
               throw new UpstreamError('our free model continuation unexpectedly requested a tool', 'STREAM_CUT')
@@ -559,7 +577,7 @@ export class FreeModelAdapter {
         outcome = collectUsage(outcome)
         usageAdded = true
         if (options.signal?.aborted === true) {
-          record(false, outcome, { aborted: true })
+          record(false, outcome, { aborted: true, failureKind: classifyFailure({ code: CODE.aborted }).kind })
           finishTurn(false, false, attempt + 1)
           yield { type: 'usage', usage: totalUsage }
           yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'request aborted', code: CODE.aborted } } }
@@ -613,14 +631,18 @@ export class FreeModelAdapter {
             : delivered || outcome.sawToolCall === true
               ? `our free model closed the stream after ${seconds}s, before its finish token; automatic recovery was not safe`
               : 'our free model closed the stream before its finish token, without answering; retrying'
-          record(false, outcome, { truncated: true })
+          record(false, outcome, { truncated: true, failureKind: classifyFailure({ code, message }).kind })
           finishTurn(false, false, attempt + 1)
           yield { type: 'usage', usage: totalUsage }
           yield { type: 'finish', reason: { kind: 'error', failure: { message, code } } }
           return { ok: false, ...advanceVerdict(code, message, undefined) }
         }
-        if (outcome.sawText !== true && outcome.sawToolCall !== true && outcome.sawReasoning !== true && reason.kind === 'stop') {
-          record(false, outcome)
+        // A normal finish is not a deliverable: exhausted or unsafe reasoning
+        // recovery must still let an uncommitted combo candidate advance.
+        const emptyAnswer = plan.allowAdvance === true ? !sawAnswer
+          : outcome.sawText !== true && outcome.sawToolCall !== true && outcome.sawReasoning !== true
+        if (emptyAnswer && reason.kind === 'stop') {
+          record(false, outcome, { failureKind: classifyFailure({ code: CODE.empty, message: 'empty response' }).kind })
           finishTurn(false, false, attempt + 1)
           yield { type: 'usage', usage: totalUsage }
           yield { type: 'finish', reason: { kind: 'error', failure: { message: 'our free model returned an empty response', code: CODE.empty } } }
@@ -642,14 +664,16 @@ export class FreeModelAdapter {
         if ((delivered || partialOutcome?.sawToolCall === true) && this.providerRetryPolicy().retryableCodes.includes(failure.code)) {
           failure = { ...failure, code: 'STREAM_CUT' }
         }
-        if (!aborted && (recovering || expired)) {
+        if (!aborted && answerExpired) {
+          failure = { code: CODE.timeout, message: 'our free model candidate did not produce an answer before its first-answer deadline' }
+        } else if (!aborted && (recovering || expired)) {
           failure = { ...failure, code: recovering || delivered || partialOutcome?.sawToolCall === true ? 'STREAM_CUT' : CODE.timeout,
             message: expired
               ? `our free model reached its ${Math.round(timeoutMs / 1000)}s time limit before its finish token${recovering ? ', during the continuation from its checkpoint' : ''}`
               : `our free model continuation failed: ${failure.message}` }
         }
         if (!usageAdded) partialOutcome = collectUsage(partialOutcome)
-        record(false, partialOutcome, { ...(recovering || expired) ? { truncated: true } : {}, ...aborted ? { aborted: true } : {} })
+        record(false, partialOutcome, { failureKind: classifyFailure({ code: aborted ? CODE.aborted : failure.code, message: failure.message, status: failure.status }).kind, ...(Number.isInteger(failure.status) ? { httpStatus: failure.status } : {}), ...(recovering || expired || answerExpired) ? { truncated: true } : {}, ...aborted ? { aborted: true } : {} })
         finishTurn(false, false, attempt + 1)
         for (const chunk of blocks.close()) yield chunk
         if (recovering || partialOutcome?.sawUsage === true) yield { type: 'usage', usage: totalUsage }
@@ -662,6 +686,7 @@ export class FreeModelAdapter {
         }
       } finally {
         clearTimeout(timer)
+        clearTimeout(answerTimer)
         options.signal?.removeEventListener('abort', onAbort)
         controller.abort()
         await request

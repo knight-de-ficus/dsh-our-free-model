@@ -185,11 +185,11 @@ export function Models({ summary, host, active }: { summary: Summary; host: Host
       <span role="status" data-testid="model-result-count">{number(models.length)} / {number(summary.catalog.length)} 个模型</span>
       {filtered && <Button variant="ghost" onClick={() => changeFilters(initialFilters)}><X size={14} />清空筛选</Button>}
     </div>
-    <div className="model-list-toolbar">
+    <div className="model-list-toolbar model-visibility-controls">
       <label><input type="checkbox" role="switch" checked={summary.settings.hideFreeModels === true}
-        disabled={visibilitySaving} onChange={event => { void saveVisibility({ hideFreeModels: event.target.checked }) }} /> {visibility.hideFree}</label>
+        disabled={visibilitySaving} onChange={event => { void saveVisibility({ hideFreeModels: event.target.checked }) }} /><span>{visibility.hideFree}</span></label>
       <label><input type="checkbox" role="switch" checked={summary.settings.hideEacModels === true}
-        disabled={visibilitySaving} onChange={event => { void saveVisibility({ hideEacModels: event.target.checked }) }} /> {visibility.hideEac}</label>
+        disabled={visibilitySaving} onChange={event => { void saveVisibility({ hideEacModels: event.target.checked }) }} /><span>{visibility.hideEac}</span></label>
     </div>
     {test && <section className={`model-test-result model-test-${test.state}`} aria-label="模型测试结果" aria-live="polite">
       <div className="model-test-heading"><div><strong>
